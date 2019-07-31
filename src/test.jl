@@ -1,7 +1,65 @@
+"""
+    TestPaths
+
+This module is intended to be used for testing new path types to
+ensure that they are adhering to the AbstractPath API.
+
+# Example
+
+```
+# Create a PathSet
+ps = PathSet(; symlink=true)
+
+# Select the subset of tests to run
+# Inspect TestPaths.TESTALL to see full list
+testsets = [
+    test_constructor,
+    test_registration,
+    test_show,
+    test_parse,
+    test_convert,
+    test_components,
+    test_parents,
+    test_join,
+    test_basename,
+    test_filename,
+    test_extensions,
+    test_isempty,
+    test_norm,
+    test_real,
+    test_relative,
+    test_abs,
+    test_isdir,
+    test_isfile,
+    test_stat,
+    test_size,
+    test_modified,
+    test_created,
+    test_cd,
+    test_readpath,
+    test_walkpath,
+    test_read,
+    test_write,
+    test_mkdir,
+    test_cp,
+    test_mv,
+    test_sync,
+    test_symlink,
+    test_touch,
+    test_tmpname,
+    test_tmpdir,
+    test_mktmp,
+    test_mktmpdir,
+    test_download,
+]
+
+# Run all the tests
+test(ps, testsets)
+```
+"""
 module TestPaths
     using Dates
     using FilePathsBase
-    using FilePathsBase: path
     using LinearAlgebra: norm
     using Test
 
@@ -46,6 +104,7 @@ module TestPaths
         test_mkdir,
         test_cp,
         test_mv,
+        test_sync,
         test_symlink,
         test_touch,
         test_tmpname,
@@ -112,13 +171,22 @@ module TestPaths
     - [X] download
     =#
     """
+        PathSet(root::AbstractPath=tmpdir(); symlink=false)
 
+    Constructs a common test path hierarchy to running shared API tests.
+
+    Hierarchy:
+
+    ```
     root
     |-- foo
     |   |-- baz.txt
     |-- bar
     |   |-- qux
     |       |-- quux.tar.gz
+    |-- fred
+    |   |-- plugh
+    ```
     """
     struct PathSet{P<:AbstractPath}
         root::P
@@ -128,7 +196,8 @@ module TestPaths
         qux::P
         quux::P
         fred::P
-        plugh::Union{P, Nothing}
+        plugh::P
+        link::Bool
     end
 
     function PathSet(root=tmpdir() / "pathset_root"; symlink=false)
@@ -142,19 +211,22 @@ module TestPaths
             root / "bar" / "qux",
             root / "bar" / "qux" / "quux.tar.gz",
             root / "fred",
-            symlink ? root / "fred" / "plugh" : nothing,
+            root / "fred" / "plugh",
+            symlink,
         )
     end
 
     function initialize(ps::PathSet)
         @info "Initializing $(typeof(ps))"
-        mkdir.([ps.foo, ps.qux, ps.fred]; recursive=true)
+        mkdir.([ps.foo, ps.qux, ps.fred]; recursive=true, exist_ok=true)
         write(ps.baz, "Hello World!")
         write(ps.quux, "Hello Again!")
 
-        # If plugh isn't nothing then create a symlink to foo
-        if ps.plugh !== nothing
+        # If link is true then plugh is a symlink to foo
+        if ps.link
             symlink(ps.foo, ps.plugh)
+        else
+            touch(ps.plugh)
         end
     end
 
@@ -203,9 +275,12 @@ module TestPaths
     function test_components(ps::PathSet)
         @testset "components" begin
             str = string(ps.root)
-            @test anchor(ps.root) == drive(ps.root) * root(ps.root)
-            @test components(ps.quux)[3:end] == path(ps.quux)
-            @test components(ps.quux)[end-2:end] == ("bar", "qux", "quux.tar.gz")
+            @test ps.root.anchor == ps.root.drive * ps.root.root
+            @test ps.quux.segments[end-2:end] == ("bar", "qux", "quux.tar.gz")
+
+            # Check that isless on the path segments works
+            @test ps.bar < ps.foo
+            @test sort([ps.foo, ps.bar, ps.fred]) == [ps.bar, ps.foo, ps.fred]
         end
     end
 
@@ -218,6 +293,13 @@ module TestPaths
             _parents = parents(ps.qux)
             @test _parents[end] == ps.bar
             @test _parents[end - 1] == ps.root
+
+            # Test that relative paths with no parents return p"."
+            @test parent(Path(basename(ps.foo))) == p"."
+
+            # Test that parent on p"." should be ===
+            path = p"."
+            @test parent(path) === path
         end
     end
 
@@ -289,7 +371,7 @@ module TestPaths
 
     function test_relative(ps::PathSet)
         @testset "relative" begin
-            @test path(relative(ps.foo, ps.qux)) == ("..", "..", "foo")
+            @test relative(ps.foo, ps.qux).segments == ("..", "..", "foo")
         end
     end
 
@@ -324,7 +406,7 @@ module TestPaths
             @test :user in fields
             @test :mode in fields
 
-            if ps.plugh !== nothing
+            if ps.link
                 @test lstat(ps.plugh) != stat(ps.plugh)
             end
 
@@ -442,16 +524,8 @@ module TestPaths
 
     function test_walkpath(ps::PathSet)
         @testset "walkpath" begin
-            topdown = [ps.bar, ps.qux, ps.quux, ps.foo, ps.baz]
-            bottomup = [ps.quux, ps.qux, ps.bar, ps.baz, ps.foo]
-
-            if ps.plugh == nothing
-                push!(topdown, ps.fred)
-                push!(bottomup, ps.fred)
-            else
-                append!(topdown, [ps.fred, ps.plugh])
-                append!(bottomup, [ps.plugh, ps.fred])
-            end
+            topdown = [ps.bar, ps.qux, ps.quux, ps.foo, ps.baz, ps.fred, ps.plugh]
+            bottomup = [ps.quux, ps.qux, ps.bar, ps.baz, ps.foo, ps.plugh, ps.fred]
 
             @test collect(walkpath(ps.root; topdown=true)) == topdown
             @test collect(walkpath(ps.root; topdown=false)) == bottomup
@@ -517,12 +591,11 @@ module TestPaths
 
     function test_cp(ps::PathSet)
         @testset "cp" begin
-            cp(ps.foo, ps.qux / "foo")
+            cp(ps.foo, ps.qux / "foo"; force=true)
             @test exists(ps.qux / "foo" / "baz.txt")
             @test_throws ArgumentError cp(ps.foo, ps.qux / "foo")
             cp(ps.foo, ps.qux / "foo"; force=true)
             rm(ps.qux / "foo"; recursive=true)
-            @test !exists(ps.qux / "foo")
         end
     end
 
@@ -532,14 +605,46 @@ module TestPaths
             mkdir(garply; recursive=true, exist_ok=true)
             @test exists(garply)
             mv(ps.root / "corge", ps.foo / "corge"; force=true)
-            @test !exists(garply)
             @test exists(ps.foo / "corge" / "grault" / "garply")
             rm(ps.foo / "corge"; recursive=true)
         end
     end
 
+    function test_sync(ps::PathSet)
+        @testset "sync" begin
+            # Base cp case
+            sync(ps.foo, ps.qux / "foo")
+            @test exists(ps.qux / "foo" / "baz.txt")
+
+            # Test that the copied baz file has a newer modified time
+            baz_t = modified(ps.qux / "foo" / "baz.txt")
+            @test modified(ps.baz) < baz_t
+
+            # Don't cp unchanged files when a new file is added
+            # NOTE: sleep before we make a new file, so it's clear tha the
+            # modified time has changed.
+            sleep(1)
+            write(ps.foo / "test.txt", "New File")
+            sync(ps.foo, ps.qux / "foo")
+            @test exists(ps.qux / "foo" / "test.txt")
+            @test read(ps.qux / "foo" / "test.txt", String) == "New File"
+            @test modified(ps.qux / "foo" / "baz.txt") == baz_t
+            @test modified(ps.qux / "foo" / "test.txt") > baz_t
+
+            # Test not deleting a file on sync
+            rm(ps.foo / "test.txt")
+            sync(ps.foo, ps.qux / "foo")
+            @test exists(ps.qux / "foo" / "test.txt")
+
+            # Test passing delete flag
+            sync(ps.foo, ps.qux / "foo"; delete=true)
+            @test !exists(ps.qux / "foo" / "test.txt")
+            rm(ps.qux / "foo"; recursive=true)
+        end
+    end
+
     function test_symlink(ps::PathSet)
-        if ps.plugh !== nothing
+        if ps.link
             @testset "symlink" begin
                 @test_throws ErrorException symlink(ps.foo, ps.plugh)
                 symlink(ps.foo, ps.plugh; exist_ok=true, overwrite=true)
@@ -645,6 +750,7 @@ module TestPaths
 
     function test_download(ps::PathSet)
         @testset "download" begin
+            rm(ps.foo / "README.md"; force=true)
             download(
                 "https://github.com/rofinn/FilePathsBase.jl/blob/master/README.md",
                 ps.foo / "README.md"
@@ -717,8 +823,6 @@ module TestPaths
                 ts(ps)
             end
         finally
-            @show ps.root
-            @show string(ps.root)
             rm(ps.root; recursive=true, force=true)
         end
     end

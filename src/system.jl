@@ -225,17 +225,16 @@ function Base.symlink(src::SystemPath, dest::SystemPath; exist_ok=false, overwri
     end
 end
 
-Base.rm(fp::SystemPath; kwargs...) = rm(string(fp); kwargs...)
+function Base.rm(fp::SystemPath; kwargs...)
+    rm(string(fp); kwargs...)
+end
 Base.touch(fp::SystemPath) = touch(string(fp))
 function mktmp(parent::SystemPath=Path(tempdir()))
     fp, io = mktemp(string(parent))
     return Path(fp), io
 end
 
-function mktmpdir(parent::SystemPath=tmpdir())
-    @show string(parent)
-    Path(mktempdir(string(parent)))
-end
+mktmpdir(parent::SystemPath=tmpdir()) = Path(mktempdir(string(parent)))
 
 """
     chown(fp::SystemPath, user::AbstractString, group::AbstractString; recursive=false)
@@ -370,7 +369,7 @@ function Base.open(f::Function, fp::SystemPath, args...; kwargs...)
     open(f, string(fp), args...; kwargs...)
 end
 
-Base.read(fp::SystemPath, args...) = read(string(fp), args...)
+Base.read(fp::SystemPath) = read(string(fp))
 function Base.write(fp::SystemPath, x::Union{String, Vector{UInt8}}, mode="w")
     open(fp, mode) do f
         write(f, x)
